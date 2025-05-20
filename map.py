@@ -5,6 +5,7 @@ from scipy.optimize import minimize
 from settings import *
 
 def estimate_source(sensors, sliders):
+    # TODO instead of weighting based of the light intensity we can use the RSI value
     positions = []
     distances = []
 
@@ -19,8 +20,18 @@ def estimate_source(sensors, sliders):
     y0 = np.mean([p[1] for p in positions])
 
     def error_func(point):
-        return sum((np.linalg.norm(np.array(point) - np.array(pos)) - d)**2
-                   for pos, d in zip(positions, distances))
+        
+        total_error = 0
+        for pos, distance in zip(positions, distances):
+            measured = np.linalg.norm(np.array(point) - np.array(pos))
+            residual = measured - distance
+
+            normalized_distance = distance / MAX_SENSOR_STRENGTH
+            weight = np.log(1 + (1 - normalized_distance))
+
+            total_error += (residual ** 2) * weight
+
+        return total_error
 
     result = minimize(error_func, [x0, y0])
     return tuple(map(int, result.x))
