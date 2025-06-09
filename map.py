@@ -1,3 +1,4 @@
+import json
 import pygame as pg
 import numpy as np
 from scipy.optimize import minimize
@@ -5,7 +6,7 @@ from scipy.optimize import minimize
 from settings import *
 
 def estimate_source(sensors, sliders):
-    # TODO instead of weighting based of the light intensity we can use the RSI value
+    # TODO instead of weighting based of the light intensity we can use the RSI value ( we cannot lol)
     positions = []
     distances = []
 
@@ -162,6 +163,53 @@ class ToggleDebugModeButton:
             self.last_toggle_time = current_time
             return self.debug_enabled
         return self.debug_enabled
+    
+class ToggleDrawModeButton:
+    def __init__(self, x, y, width, height):
+        self.rect = pg.Rect(x, y, width, height)
+        self.active_color = (255, 255, 0)
+        self.active_text_color = (0, 0, 0)
+        self.inactive_color = (55, 55, 0)
+        self.inactive_text_color = (255, 255, 255)
+        self.cooldown_color = (100, 100, 100)
+        self.current_color = self.inactive_color
+        self.last_toggle_time = 0
+        self.cooldown_ms = 500
+        self.draw_enabled = False
+
+    def draw(self, screen):
+        now = pg.time.get_ticks()
+        elapsed = now - self.last_toggle_time
+        progress = min(elapsed / self.cooldown_ms, 1.0)
+
+        if progress < 1.0:
+            # Interpolate color between cooldown and target color
+            target = self.active_color if self.draw_enabled else self.inactive_color
+            r = int(self.cooldown_color[0] + (target[0] - self.cooldown_color[0]) * progress)
+            g = int(self.cooldown_color[1] + (target[1] - self.cooldown_color[1]) * progress)
+            b = int(self.cooldown_color[2] + (target[2] - self.cooldown_color[2]) * progress)
+            self.current_color = (r, g, b)
+        else:
+            self.current_color = self.active_color if self.draw_enabled else self.inactive_color
+
+        pg.draw.rect(screen, self.current_color, self.rect)
+        font = pg.font.Font(None, 36)
+        text = font.render("Pencil mode", True, 
+                           self.active_text_color if self.draw_enabled else self.inactive_text_color)
+        text_rect = text.get_rect(center=self.rect.center)
+        screen.blit(text, text_rect)
+
+    def handle_event(self, event):
+        current_time = pg.time.get_ticks()
+        if (
+            event.type == pg.MOUSEBUTTONDOWN
+            and self.rect.collidepoint(event.pos)
+            and current_time - self.last_toggle_time > self.cooldown_ms
+        ):
+            self.draw_enabled = not self.draw_enabled
+            self.last_toggle_time = current_time
+            return self.draw_enabled
+        return self.draw_enabled
 
 class SensorToggleSwitch:
     def __init__(self, sensor, offset_x=40, offset_y=-10):
@@ -213,36 +261,89 @@ class SensorToggleSwitch:
             self.last_toggle_time = now
 
 
-if __name__ == "__main__":
+def main():
     pg.init()
     screen = pg.display.set_mode((WIDTH, HEIGHT))
     pg.display.set_caption("Sensor Map")
     clock = pg.time.Clock()
 
+    try:
+        with open('state.json') as f:
+            state = json.load(f)
+        sensors = [Sensor(**d) for d in state['sensors']]
+        sliders = []
+        for s, d in zip(sensors, state['sliders']):
+            sl = SensorSlider(s)
+            sl.value = d['value']
+            sliders.append(sl)
+        draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
+        strokes = state['strokes']
+        # redraw saved strokes
+        for stroke in strokes:
+            for i in range(1, len(stroke)):
+                pg.draw.line(draw_surf, (200,200,200), stroke[i-1], stroke[i], 2)
+
+        m = Map(WIDTH, HEIGHT)
+        m.map.fill(map_bg_color)
+    except FileNotFoundError:
+        # fallback to defaults
+        m = Map(WIDTH, HEIGHT)
+        m.map.fill(map_bg_color)
+        sensors = [Sensor(100,100,20,20,True),
+                   Sensor(200,200,20,20,True),
+                   Sensor(300,100,20,20,True)]
+        sliders = [SensorSlider(s) for s in sensors]
+        draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
+        strokes = []
+
     # responsible for displaying things like erm.. the circles of influence for sensors
     debug_mode = True
-    
-    m = Map(WIDTH, HEIGHT)
-    sensors = [
-        Sensor(100, 100, 20, 20, True),
-        Sensor(200, 200, 20, 20, True),
-        Sensor(300, 100, 20, 20, True),
-    ]
+
+    # enables user to draw the scenery / room design on the map
+    draw_mode = True 
 
     sliders = [SensorSlider(s) for s in sensors]
 
     add_sensor_button = AddSensorButton(10, 10, 200, 50)
-
     toggle_debug_button = ToggleDebugModeButton(WIDTH - 20 - 200, 10, 200, 50)
+    toggle_draw_button = ToggleDrawModeButton(WIDTH - 20 - 200, 70, 200, 50)
 
     sensor_toggles = [SensorToggleSwitch(s) for s in sensors]
 
+
+    draw_mode = False
+    current = []
     dragged_sensor = None
     running = True
     while running:
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 running = False
+
+            draw_mode = toggle_draw_button.handle_event(event)
+            
+            if draw_mode:
+                if event.type == pg.MOUSEBUTTONDOWN and event.button == 1:
+                    current = [event.pos]
+                elif event.type == pg.MOUSEMOTION and getattr(event, "buttons", (0,))[0]:
+                    current.append(event.pos)
+                    if len(current) > 1:
+                        pg.draw.line(draw_surf, (200,200,200), current[-2], current[-1], 2)
+                elif event.type == pg.MOUSEBUTTONUP and event.button == 1:
+                    if current:
+                        strokes.append(current)
+                        current = []
+                
+                elif event.type == pg.KEYDOWN and event.key == pg.K_z and (event.mod & pg.KMOD_CTRL):
+                    if strokes:
+                        strokes.pop()
+                        # clear surface and redraw remaining strokes
+                        draw_surf.fill((0,0,0,0))
+                        for stroke in strokes:
+                            for i in range(1, len(stroke)):
+                                pg.draw.line(draw_surf, (200,200,200), stroke[i-1], stroke[i], 2)
+            
+                continue  # Skip the rest of the button / key handling loop if in draw mode
 
             if event.type == pg.MOUSEBUTTONDOWN:
                 for s in sensors:
@@ -271,6 +372,7 @@ if __name__ == "__main__":
                 toggle.handle_event(event)
 
         m.draw(screen)
+        screen.blit(draw_surf, (0,0))   # show pencil drawing
         for s in sensors:
             s.draw(screen)
         for slider in sliders:
@@ -279,14 +381,30 @@ if __name__ == "__main__":
             toggle.draw(screen)
         add_sensor_button.draw(screen)
         toggle_debug_button.draw(screen)
+        toggle_draw_button.draw(screen)
 
         active_sensors = [s for s in sensors if s.active]
-        if len(active_sensors) >= 3:
+        if len(active_sensors) >= 2:
             estimated_pos = estimate_source(active_sensors, sliders)
-            pg.draw.circle(screen, (255, 255, 0), estimated_pos, 8)
-        # pg.draw.circle(screen, (255, 255, 0), (WIDTH // 2, HEIGHT // 2), 8)
+            pg.draw.circle(screen, (255, 205, 0), estimated_pos, 8)
 
         pg.display.flip()
         clock.tick(60)
 
+
+    data = {
+        'sensors': [
+            {'x': s.x, 'y': s.y, 'width': s.width,
+             'height': s.height, 'active': s.active}
+            for s in sensors
+        ],
+        'sliders': [{'value': sl.value} for sl in sliders],
+        'strokes': strokes
+    }
+    with open('state.json', 'w') as f:
+        json.dump(data, f)
+
     pg.quit()
+
+if __name__ == "__main__":
+    main()
