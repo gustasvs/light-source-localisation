@@ -1,0 +1,9 @@
+#
+# Application specific config file
+#
+
+USE_RADIO=y
+USE_ADC=y
+USE_PRINT=y
+USE_SERIAL=y
+USE_SERIAL_NUMBER=y

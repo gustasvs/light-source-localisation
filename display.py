@@ -2,6 +2,9 @@ import json
 import pygame as pg
 import numpy as np
 from scipy.optimize import minimize
+import serial
+import serial.tools.list_ports
+
 
 from settings import *
 
@@ -267,6 +270,7 @@ def main():
     pg.display.set_caption("Sensor Map")
     clock = pg.time.Clock()
 
+    # -- PREVIOUS MAP STATE LOADING --
     try:
         with open('state.json') as f:
             state = json.load(f)
@@ -296,26 +300,58 @@ def main():
         draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
         strokes = []
 
+    # -- VARIABLES --
+
     # responsible for displaying things like erm.. the circles of influence for sensors
     debug_mode = True
-
     # enables user to draw the scenery / room design on the map
     draw_mode = True 
-
-    sliders = [SensorSlider(s) for s in sensors]
-
-    add_sensor_button = AddSensorButton(10, 10, 200, 50)
-    toggle_debug_button = ToggleDebugModeButton(WIDTH - 20 - 200, 10, 200, 50)
-    toggle_draw_button = ToggleDrawModeButton(WIDTH - 20 - 200, 70, 200, 50)
-
-    sensor_toggles = [SensorToggleSwitch(s) for s in sensors]
-
-
     draw_mode = False
     current = []
     dragged_sensor = None
     running = True
+
+    # -- PYGAME OBJECTS AND STUFF --
+
+    sliders = [SensorSlider(s) for s in sensors]
+    add_sensor_button = AddSensorButton(10, 10, 200, 50)
+    toggle_debug_button = ToggleDebugModeButton(WIDTH - 20 - 200, 10, 200, 50)
+    toggle_draw_button = ToggleDrawModeButton(WIDTH - 20 - 200, 70, 200, 50)
+    sensor_toggles = [SensorToggleSwitch(s) for s in sensors]
+
+    # -- RECIEVER -- 
+
+    ports = serial.tools.list_ports.comports()
+    print("Ports: ", ports)
+    for p in ports:
+        print(p.device)
+
+
+    try:
+        ser = serial.Serial('/dev/ttyUSB0', 38400, timeout=0)
+    except serial.SerialException as e:
+        print(f"Error opening serial port: {e}")
+        print("Running basic mode.")
+        ser = None
+
+    
     while running:
+        # -- READ DATA FROM THE MOTES --
+
+        if ser and ser.in_waiting:
+            line = ser.readline().decode('ascii', errors='ignore').strip()
+            try:
+                data = json.loads(line)
+                # e.g. find matching sensor/slider and update its value:
+                for sl in sliders:
+                    if getattr(sl.sensor, 'id', None) == data['senderID']:
+                        sl.value = data['light']
+            except json.JSONDecodeError:
+                pass
+
+
+        # -- HANDLE VARIOUS EVENTS
+
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 running = False
@@ -371,8 +407,10 @@ def main():
             for toggle in sensor_toggles:
                 toggle.handle_event(event)
 
+        # -- DRAW --
+
         m.draw(screen)
-        screen.blit(draw_surf, (0,0))   # show pencil drawing
+        screen.blit(draw_surf, (0,0))
         for s in sensors:
             s.draw(screen)
         for slider in sliders:
@@ -392,6 +430,7 @@ def main():
         clock.tick(60)
 
 
+    # -- SAVE STATE --
     data = {
         'sensors': [
             {'x': s.x, 'y': s.y, 'width': s.width,
