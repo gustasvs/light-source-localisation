@@ -1,0 +1,22 @@
+diff --git a/mos/make/Makefile b/mos/make/Makefile
+index 5e64e44..0866668 100644
+--- a/mos/make/Makefile
++++ b/mos/make/Makefile
+@@ -485,8 +485,5 @@ setupbase_about:
+ #      @echo ">>> pip3 install wxtools"
+ 
+ setupbase:
+-       sudo apt install python3 python3-ply python3-serial
+-#      pip3 install wxtools
+ 
+ yesno:
+-       @echo -n "Are you sure? [y/N] " && read ans && [ $${ans:-N} = y ]
+diff --git a/mos/make/arch/Makefile.msp430 b/mos/make/arch/Makefile.msp430
+index 47bd1ec..c1d1354 100644
+--- a/mos/make/arch/Makefile.msp430
++++ b/mos/make/arch/Makefile.msp430
+@@ -149,4 +149,3 @@ setup-msp430_about:
+        @echo ">>> sudo apt-get install gcc-msp430 binutils-msp430 msp430-libc msp430mcu"
+ 
+ setup-msp430:
+-       sudo apt-get install gcc-msp430 binutils-msp430 msp430-libc msp430mcu

@@ -5,6 +5,8 @@ from scipy.optimize import minimize
 import serial
 import serial.tools.list_ports
 
+import re
+
 
 from settings import *
 
@@ -55,17 +57,24 @@ class Map:
         pass
 
 class Sensor:
-    def __init__(self, x, y, width, height, active=False):
+    def __init__(self, x, y, width, height, active=False, sensor_id=None):
         self.x = x
         self.y = y
         self.width = width
         self.height = height
         self.rect = pg.Rect(x, y, width, height)
         self.active = active
+        self.id = sensor_id
 
     def draw(self, screen):
         color = map_sensor_active_color if self.active else map_sensor_inactive_color
         pg.draw.circle(screen, color, (self.x + self.width // 2, self.y + self.height // 2), self.width // 2)
+
+        if self.id is not None:
+            font = pg.font.Font(None, 28)
+            label = font.render(str(self.id), True, (255, 255, 255))
+            screen.blit(label, label.get_rect(center=(self.x + self.width // 2, self.y - self.height * 1.5)))
+
 
 class SensorSlider:
     def __init__(self, sensor):
@@ -88,7 +97,7 @@ class SensorSlider:
             center_y = self.sensor.y + self.sensor.height // 2
             radius = MAX_SENSOR_STRENGTH + 10 - self.value
 
-            pg.draw.circle(screen, (100, 100, 255), (center_x, center_y), radius, 1)
+            pg.draw.circle(screen, (10, 75, 75), (center_x, center_y), radius, 1)
 
 
     def handle_event(self, event):
@@ -264,6 +273,38 @@ class SensorToggleSwitch:
             self.last_toggle_time = now
 
 
+class LightPoint:
+    def __init__(self, x, y, strength):
+        self.x = x
+        self.y = y
+        self.center_width = 10
+        self.pulse_start_time = pg.time.get_ticks()
+        self.cycle_duration = 3500
+
+    def update(self, new_x, new_y, new_strength):
+        self.x = new_x
+        self.y = new_y
+
+    def draw(self, screen):
+        color = (255, 255, 0)
+        pg.draw.circle(screen, color, (self.x, self.y), self.center_width)
+
+        # Pulsing rings
+        now = pg.time.get_ticks()
+        elapsed = (now - getattr(self, "pulse_start_time", now)) % self.cycle_duration
+        num_rings = 4
+        max_radius = 50
+        for i in range(num_rings):
+            # Each ring is offset in time
+            t = ((elapsed + i * (self.cycle_duration / num_rings)) % self.cycle_duration) / self.cycle_duration
+            radius = int(20 + t * max_radius)
+            alpha = int(120 * (1 - t))
+            if alpha <= 0:
+                continue
+            ring_surf = pg.Surface((radius * 2, radius * 2), pg.SRCALPHA)
+            pg.draw.circle(ring_surf, (255, 255, 0, alpha), (radius, radius), radius, 4)
+            screen.blit(ring_surf, (self.x - radius, self.y - radius))
+
 def main():
     pg.init()
     screen = pg.display.set_mode((WIDTH, HEIGHT))
@@ -272,33 +313,35 @@ def main():
 
     # -- PREVIOUS MAP STATE LOADING --
     try:
-        with open('state.json') as f:
-            state = json.load(f)
-        sensors = [Sensor(**d) for d in state['sensors']]
-        sliders = []
-        for s, d in zip(sensors, state['sliders']):
-            sl = SensorSlider(s)
-            sl.value = d['value']
-            sliders.append(sl)
-        draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
-        strokes = state['strokes']
-        # redraw saved strokes
-        for stroke in strokes:
-            for i in range(1, len(stroke)):
-                pg.draw.line(draw_surf, (200,200,200), stroke[i-1], stroke[i], 2)
+        if SENSOR_MODE:
+            sensors, sliders = [], []
+            draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
+        else:
+            with open('state.json') as f:
+                state = json.load(f)
+            sensors = [Sensor(**d) for d in state['sensors']]
+            sliders = []
+            for s, d in zip(sensors, state['sliders']):
+                sl = SensorSlider(s)
+                sl.value = d['value']
+                sliders.append(sl)
+            draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
+            strokes = state['strokes']
+            # redraw saved strokes
+            for stroke in strokes:
+                for i in range(1, len(stroke)):
+                    pg.draw.line(draw_surf, (200,200,200), stroke[i-1], stroke[i], 2)
 
-        m = Map(WIDTH, HEIGHT)
-        m.map.fill(map_bg_color)
     except FileNotFoundError:
         # fallback to defaults
-        m = Map(WIDTH, HEIGHT)
-        m.map.fill(map_bg_color)
         sensors = [Sensor(100,100,20,20,True),
                    Sensor(200,200,20,20,True),
                    Sensor(300,100,20,20,True)]
         sliders = [SensorSlider(s) for s in sensors]
         draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
         strokes = []
+    m = Map(WIDTH, HEIGHT)
+    m.map.fill(map_bg_color)
 
     # -- VARIABLES --
 
@@ -318,6 +361,7 @@ def main():
     toggle_debug_button = ToggleDebugModeButton(WIDTH - 20 - 200, 10, 200, 50)
     toggle_draw_button = ToggleDrawModeButton(WIDTH - 20 - 200, 70, 200, 50)
     sensor_toggles = [SensorToggleSwitch(s) for s in sensors]
+    light_point = LightPoint(0, 0, 0)
 
     # -- RECIEVER -- 
 
@@ -328,26 +372,60 @@ def main():
 
 
     try:
+        # ser = serial.Serial('COM3', 38400, timeout=0)
+        # print("Serial port COM3 opened successfully.")
         ser = serial.Serial('/dev/ttyUSB0', 38400, timeout=0)
+        print("Serial port /dev/ttyUSB0 opened successfully.")  
     except serial.SerialException as e:
         print(f"Error opening serial port: {e}")
         print("Running basic mode.")
         ser = None
 
     
+    serial_buffer = ""
     while running:
         # -- READ DATA FROM THE MOTES --
+        if ser:
+            serial_buffer += ser.read(ser.in_waiting or 1).decode('ascii', 'ignore')
+            while '<START>' in serial_buffer and '<END>' in serial_buffer:
+                start = serial_buffer.find('<START>') + len('<START>')
+                end   = serial_buffer.find('<END>', start)
+                if end == -1:
+                    break
 
-        if ser and ser.in_waiting:
-            line = ser.readline().decode('ascii', errors='ignore').strip()
-            try:
-                data = json.loads(line)
-                # e.g. find matching sensor/slider and update its value:
+                frame = serial_buffer[start:end]     # e.g. "DEBUG_INFO=SENSOR_DATA, ID=17, Light=645, Seq=3"
+                serial_buffer = serial_buffer[end + len('<END>'):]
+
+                pattern = re.search(
+                    r'DEBUG_INFO=([^,]+),\s*ID=(\d+),\s*Light=(\d+)(?:,\s*Seq=(\d+))?',
+                    frame
+                )
+                if not pattern:
+                    continue
+
+                debug_info = pattern.group(1)               # string: SINK_DATA / SENSOR_DATA
+                sender_id  = int(pattern.group(2))
+                light      = int(pattern.group(3))
+                seq        = pattern.group(4)
+                seq        = int(seq) if seq is not None else None
+
+                print(f"Received {debug_info} from mote {sender_id}: "
+                    f"Light={light}" + (f", Seq={seq}" if seq is not None else ""))
+
+                # update sliders only for sensor frames
+                # if debug_info == "SENSOR_DATA":
+                sensor = next((s for s in sensors if s.id == sender_id), None)
+                if sensor is None:
+                    sensor = Sensor(150, 150, 20, 20, True, sender_id)
+                    sensors.append(sensor)
+                    sliders.append(SensorSlider(sensor))
+                    sensor_toggles.append(SensorToggleSwitch(sensor))
+
+                # update slider value
                 for sl in sliders:
-                    if getattr(sl.sensor, 'id', None) == data['senderID']:
-                        sl.value = data['light']
-            except json.JSONDecodeError:
-                pass
+                    if sl.sensor.id == sender_id:
+                        sl.value = light
+
 
 
         # -- HANDLE VARIOUS EVENTS
@@ -424,7 +502,10 @@ def main():
         active_sensors = [s for s in sensors if s.active]
         if len(active_sensors) >= 2:
             estimated_pos = estimate_source(active_sensors, sliders)
-            pg.draw.circle(screen, (255, 205, 0), estimated_pos, 8)
+            # pg.draw.circle(screen, (255, 205, 0), estimated_pos, 8)
+            light_point.update(estimated_pos[0], estimated_pos[1], MAX_SENSOR_STRENGTH)
+
+        light_point.draw(screen)
 
         pg.display.flip()
         clock.tick(60)
