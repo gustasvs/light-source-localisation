@@ -2,6 +2,7 @@ import json
 import pygame as pg
 import numpy as np
 from scipy.optimize import minimize
+from itertools import combinations
 import serial
 import serial.tools.list_ports
 
@@ -11,36 +12,30 @@ import re
 from settings import *
 
 def estimate_source(sensors, sliders):
-    # TODO instead of weighting based of the light intensity we can use the RSI value ( we cannot lol)
-    positions = []
-    distances = []
+    # centres and readings -----------------------------------------------
+    positions = [(s.x + s.width//2, s.y + s.height//2) for s in sensors]
+    readings  = np.array([sl.value for sl in sliders], dtype=float)
+    logs      = np.log(readings + EPS)                 # avoid log(0)
 
-    for sensor, slider in zip(sensors, sliders):
-        x = sensor.x + sensor.width // 2
-        y = sensor.y + sensor.height // 2
-        positions.append((x, y))
-        # greater the value of the slider means it recieves brighter signal
-        distances.append(MAX_SENSOR_STRENGTH + 10 - slider.value)
+    # initial guess -------------------------------------------------------
+    x0, y0 = np.mean([p[0] for p in positions]), np.mean([p[1] for p in positions])
 
-    x0 = np.mean([p[0] for p in positions])
-    y0 = np.mean([p[1] for p in positions])
+    # objective using all unordered pairs --------------------------------
+    pairs = list(combinations(range(len(positions)), 2))
 
-    def error_func(point):
-        
-        total_error = 0
-        for pos, distance in zip(positions, distances):
-            measured = np.linalg.norm(np.array(point) - np.array(pos))
-            residual = measured - distance
+    def error(pt):
+        x, y = pt
+        total = 0.0
+        for i, j in pairs:
+            di = np.hypot(x - positions[i][0], y - positions[i][1]) + EPS
+            dj = np.hypot(x - positions[j][0], y - positions[j][1]) + EPS
+            lhs = logs[i] - logs[j]
+            rhs = 2.0 * (np.log(dj) - np.log(di))
+            total += (lhs - rhs) ** 2
+        return total
 
-            normalized_distance = distance / MAX_SENSOR_STRENGTH
-            weight = np.log(1 + (1 - normalized_distance))
-
-            total_error += (residual ** 2) * weight
-
-        return total_error
-
-    result = minimize(error_func, [x0, y0])
-    return tuple(map(int, result.x))
+    res = minimize(error, (x0, y0))
+    return tuple(map(int, res.x))
 
 class Map:
     def __init__(self, width, height):
@@ -86,7 +81,7 @@ class SensorSlider:
         self.bar_rect = pg.Rect(sensor.x - (self.width / 2) + 10,
                                  sensor.y + 40, self.width, self.height)
 
-    def draw(self, screen, debug_mode):
+    def draw(self, screen, debug_mode, C):
         pg.draw.rect(screen, (150, 150, 150), self.bar_rect)
         # Calculate slider_x based on value (left to right)
         slider_x = self.bar_rect.x + int((self.value - MIN_SENSOR_STRENGTH) / (MAX_SENSOR_STRENGTH - MIN_SENSOR_STRENGTH) * self.width)
@@ -95,9 +90,14 @@ class SensorSlider:
         if debug_mode:
             center_x = self.sensor.x + self.sensor.width // 2
             center_y = self.sensor.y + self.sensor.height // 2
-            radius = MAX_SENSOR_STRENGTH + 10 - self.value
 
-            pg.draw.circle(screen, (10, 75, 75), (center_x, center_y), radius, 1)
+            # raw inverse-sqrt distance proxy
+            inv_sqrt = 1.0 / np.sqrt(self.value + 1e-9)
+
+            # pixel scale ‘C’ computed once per frame and passed in
+            radius   = int(C * inv_sqrt)
+            pg.draw.circle(screen, (15, 105, 205),
+                        (center_x, center_y), radius, 3)
 
 
     def handle_event(self, event):
@@ -141,7 +141,7 @@ class ToggleDebugModeButton:
         self.current_color = self.inactive_color
         self.last_toggle_time = 0
         self.cooldown_ms = 500
-        self.debug_enabled = False
+        self.debug_enabled = True
 
     def draw(self, screen):
         now = pg.time.get_ticks()
@@ -316,6 +316,18 @@ def main():
         if SENSOR_MODE:
             sensors, sliders = [], []
             draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
+            # small block for strokes on sensor mode
+            try:
+                with open('state.json') as f:
+                    state = json.load(f)
+                strokes = state['strokes']
+                # redraw saved strokes
+                for stroke in strokes:
+                    for i in range(1, len(stroke)):
+                        pg.draw.line(draw_surf, (200,200,200), stroke[i-1], stroke[i], 2)
+            except FileNotFoundError:
+                strokes = []
+        
         else:
             with open('state.json') as f:
                 state = json.load(f)
@@ -485,25 +497,37 @@ def main():
             for toggle in sensor_toggles:
                 toggle.handle_event(event)
 
+        active_sensors = [s for s in sensors if s.active]
+        if len(active_sensors) >= 2:
+            estimated_pos = estimate_source(active_sensors, sliders)
+            # pg.draw.circle(screen, (255, 205, 0), estimated_pos, 8)
+            light_point.update(estimated_pos[0], estimated_pos[1], MAX_SENSOR_STRENGTH)
+
         # -- DRAW --
 
         m.draw(screen)
         screen.blit(draw_surf, (0,0))
         for s in sensors:
             s.draw(screen)
-        for slider in sliders:
-            slider.draw(screen, debug_mode)
+        raw_radii = [1/np.sqrt(sl.value + 1e-9) for sl in sliders]
+        reference_median_raw = np.median(raw_radii) or 1.0
+
+        dists = [np.hypot(s.x + s.width//2 - estimated_pos[0],
+                  s.y + s.height//2 - estimated_pos[1]) for s in sensors]
+
+        # 3. Matching pixel scale:  C = mean( d_i * √R_i )
+        C = np.mean([d * np.sqrt(sl.value + 1e-9)
+                    for d, sl in zip(dists, sliders)])
+
+        # 4. Draw sliders with that single scale
+        for sl in sliders:
+            sl.draw(screen, debug_mode, C)
+
         for toggle in sensor_toggles:
             toggle.draw(screen)
         add_sensor_button.draw(screen)
         toggle_debug_button.draw(screen)
         toggle_draw_button.draw(screen)
-
-        active_sensors = [s for s in sensors if s.active]
-        if len(active_sensors) >= 2:
-            estimated_pos = estimate_source(active_sensors, sliders)
-            # pg.draw.circle(screen, (255, 205, 0), estimated_pos, 8)
-            light_point.update(estimated_pos[0], estimated_pos[1], MAX_SENSOR_STRENGTH)
 
         light_point.draw(screen)
 
