@@ -5,6 +5,7 @@ from scipy.optimize import minimize
 from itertools import combinations
 import serial
 import serial.tools.list_ports
+from data_simulator import DataSimulator
 
 import re
 
@@ -80,6 +81,10 @@ class SensorSlider:
         self.height = 10
         self.bar_rect = pg.Rect(sensor.x - (self.width / 2) + 10,
                                  sensor.y + 40, self.width, self.height)
+        
+        self.last_time_updated = pg.time.get_ticks()
+
+        self.past_values = []
 
     def draw(self, screen, debug_mode, C):
         pg.draw.rect(screen, (150, 150, 150), self.bar_rect)
@@ -87,7 +92,10 @@ class SensorSlider:
         slider_x = self.bar_rect.x + int((self.value - MIN_SENSOR_STRENGTH) / (MAX_SENSOR_STRENGTH - MIN_SENSOR_STRENGTH) * self.width)
         pg.draw.rect(screen, (255, 100, 100), (slider_x - 4, self.bar_rect.y - 2, 8, self.height + 4))
 
-        if debug_mode:
+        if self.last_time_updated + SENSOR_INACTIVE_TIMEOUT < pg.time.get_ticks():
+            self.sensor.active = False
+
+        if debug_mode and self.sensor.active:
             center_x = self.sensor.x + self.sensor.width // 2
             center_y = self.sensor.y + self.sensor.height // 2
 
@@ -113,6 +121,18 @@ class SensorSlider:
         rel_x = max(self.bar_rect.x, min(x_pos, self.bar_rect.x + self.width))
         ratio = (rel_x - self.bar_rect.x) / self.width
         self.value = int(MIN_SENSOR_STRENGTH + ratio * (MAX_SENSOR_STRENGTH - MIN_SENSOR_STRENGTH))
+
+    def set_new_value(self, new_value):
+        
+        self.last_time_updated = pg.time.get_ticks()
+        self.past_values.append(new_value)
+        self.sensor.active = True
+        
+        if len(self.past_values) > PAST_VALUE_SMOOTHING_WINDOW:
+            self.past_values.pop(0)
+
+        # update the value
+        self.value = np.mean(self.past_values)
 
 class AddSensorButton:
     def __init__(self, x, y, width, height):
@@ -310,6 +330,8 @@ def main():
     screen = pg.display.set_mode((WIDTH, HEIGHT))
     pg.display.set_caption("Sensor Map")
     clock = pg.time.Clock()
+    tick = 0
+    data_simulator = DataSimulator('simulated_data.xlsx') if SIMULATION_MODE else None
 
     # -- PREVIOUS MAP STATE LOADING --
     try:
@@ -328,14 +350,15 @@ def main():
             except FileNotFoundError:
                 strokes = []
         
-        else:
+        elif not SIMULATION_MODE:
             with open('state.json') as f:
                 state = json.load(f)
+                
             sensors = [Sensor(**d) for d in state['sensors']]
             sliders = []
             for s, d in zip(sensors, state['sliders']):
                 sl = SensorSlider(s)
-                sl.value = d['value']
+                # sl.value = d['value']
                 sliders.append(sl)
             draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
             strokes = state['strokes']
@@ -343,6 +366,9 @@ def main():
             for stroke in strokes:
                 for i in range(1, len(stroke)):
                     pg.draw.line(draw_surf, (200,200,200), stroke[i-1], stroke[i], 2)
+        else:
+            sensors, sliders, strokes = [], [], []
+            draw_surf = pg.Surface((WIDTH, HEIGHT), pg.SRCALPHA)
 
     except FileNotFoundError:
         # fallback to defaults
@@ -397,7 +423,7 @@ def main():
     serial_buffer = ""
     while running:
         # -- READ DATA FROM THE MOTES --
-        if ser:
+        if ser and not SIMULATION_MODE:
             serial_buffer += ser.read(ser.in_waiting or 1).decode('ascii', 'ignore')
             while '<START>' in serial_buffer and '<END>' in serial_buffer:
                 start = serial_buffer.find('<START>') + len('<START>')
@@ -405,7 +431,7 @@ def main():
                 if end == -1:
                     break
 
-                frame = serial_buffer[start:end]     # e.g. "DEBUG_INFO=SENSOR_DATA, ID=17, Light=645, Seq=3"
+                frame = serial_buffer[start:end] # e.g. "DEBUG_INFO=SENSOR_DATA, ID=17, Light=645, Seq=3"
                 serial_buffer = serial_buffer[end + len('<END>'):]
 
                 pattern = re.search(
@@ -415,7 +441,7 @@ def main():
                 if not pattern:
                     continue
 
-                debug_info = pattern.group(1)               # string: SINK_DATA / SENSOR_DATA
+                debug_info = pattern.group(1) # string: SINK_DATA / SENSOR_DATA
                 sender_id  = int(pattern.group(2))
                 light      = int(pattern.group(3))
                 seq        = pattern.group(4)
@@ -436,8 +462,35 @@ def main():
                 # update slider value
                 for sl in sliders:
                     if sl.sensor.id == sender_id:
-                        sl.value = light
+                        # sl.value = light
+                        sl.set_new_value(light)
+        
 
+        if SIMULATION_MODE:
+            positions = [
+                [280, 180],
+                [WIDTH - 180, 180],
+                [WIDTH - 280, HEIGHT - 180],
+                [280, HEIGHT - 180],
+                [WIDTH // 2, HEIGHT // 2],
+            ]
+        
+            simulated_data = data_simulator.get_light_values(tick)
+            # print(f"Tick {tick}: Simulated data: {simulated_data}")
+            tick += 1
+            for idx, light in enumerate(simulated_data):
+                if light is None:
+                    continue
+                sensor = next((s for s in sensors if s.id == idx), None)
+                if sensor is None:
+                    x, y = positions[idx]
+                    sensor = Sensor(x, y, 20, 20, True, idx)
+                    sensors.append(sensor)
+                    sliders.append(SensorSlider(sensor))
+                    sensor_toggles.append(SensorToggleSwitch(sensor))
+                for sl in sliders:
+                    if sl.sensor.id == idx:
+                        sl.set_new_value(light)
 
 
         # -- HANDLE VARIOUS EVENTS
